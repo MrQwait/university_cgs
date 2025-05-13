@@ -1,151 +1,76 @@
-# main.py
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
-from io import BytesIO
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import FileResponse
 import pandas as pd
-import numpy as np
-from typing import List
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime
+import os
+import tempfile
+from coordinate_transform import GSK_2011, generate_report_md
 
-# Инициализация FastAPI приложения
-app = FastAPI(
-    title="Excel to Markdown API",
-    description="API для обработки Excel файлов и генерации отчетов в формате Markdown",
-    version="1.0.0"
-)
+app = FastAPI()
 
 @app.get("/")
-def read_root():
-    """Корневой маршрут, возвращающий информацию о сервисе"""
+async def root():
     return {
-        "message": "Excel to Markdown API работает",
+        "message": "Coordinate Transformation API работает",
         "endpoints": {
-            "/process-excel/": "Загрузка и обработка Excel-файла с генерацией отчета в формате Markdown"
+            "/process-csv/": "Загрузка и обработка CSV-файла с координатами и генерация Markdown-отчета"
         }
     }
 
-@app.post("/process-excel/")
-async def process_excel(file: UploadFile = File(...)):
-    """
-    Обрабатывает загруженный Excel-файл и возвращает отчет в формате Markdown
-    """
-    # Проверка формата файла
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(
-            status_code=400,
-            detail="Поддерживаются только файлы Excel (.xlsx, .xls)"
-        )
+@app.post("/process-csv/")
+async def process_csv(file: UploadFile = File(...)):
+    # Проверка расширения файла
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Требуется CSV-файл")
+
+    # Создание временных файлов
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_input:
+        input_path = tmp_input.name
+        tmp_input.write(await file.read())
+
+    output_md_path = tempfile.NamedTemporaryFile(delete=False, suffix=".md").name
 
     try:
-        # Чтение содержимого файла
-        contents = await file.read()
-        buffer = BytesIO(contents)
+        # Чтение CSV-файла
+        print(f"Reading CSV from {input_path}")
+        df = pd.read_csv(input_path)
+        required_columns = ['Name', 'X', 'Y', 'Z']
+        if not all(col in df.columns for col in required_columns):
+            raise HTTPException(status_code=400, detail="CSV должен содержать колонки: Name, X, Y, Z")
 
-        # Загрузка Excel-файла в DataFrame
-        df = pd.read_excel(buffer)
+        # Преобразование координат с помощью GSK_2011
+        print("Calling GSK_2011")
+        df_transformed = GSK_2011(
+            sk1="СК-42",
+            sk2="ГСК-2011",
+            parameters_path="parameters.json",
+            df=df,
+            save_path=None
+        )
 
-        # Генерация отчета в формате Markdown на основе данных
-        report = generate_markdown_report(df)
+        # Переименование колонок для generate_report_md
+        print("Renaming columns")
+        df_transformed = df_transformed.rename(columns={"X": "X_new", "Y": "Y_new", "Z": "Z_new"})
 
-        # Создание байтового объекта для хранения отчета
-        output = BytesIO(report.encode())
-        output.seek(0)
+        # Генерация Markdown-отчета
+        print(f"Generating report at {output_md_path}")
+        df_after = generate_report_md(
+            df_before=df,  # Исходный DataFrame для отчета
+            sk1="СК-42",
+            sk2="ГСК-2011",
+            parameters_path="parameters.json",
+            md_path=output_md_path,
+            csv_before=None,
+            csv_after=None
+        )
 
-        # Возвращаем отчет как скачиваемый файл
-        filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        return StreamingResponse(
-            output,
+        # Возврат Markdown-файла
+        print("Returning FileResponse")
+        return FileResponse(
+            output_md_path,
             media_type="text/markdown",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            filename="report.md"
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка обработки файла: {str(e)}")
-
-def generate_markdown_report(df: pd.DataFrame) -> str:
-    """
-    Генерирует отчет в формате Markdown на основе предоставленного DataFrame
-    """
-    # Создаем заголовок отчета
-    report = f"# Отчет по анализу данных\n\n"
-    report += f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-    # Основная информация о данных
-    report += f"## Общая информация\n\n"
-    report += f"- **Количество строк**: {df.shape[0]}\n"
-    report += f"- **Количество столбцов**: {df.shape[1]}\n"
-    report += f"- **Столбцы**: {', '.join(df.columns)}\n\n"
-
-    # Статистика по числовым столбцам
-    report += f"## Статистический анализ\n\n"
-
-    # Проверяем наличие числовых столбцов
-    numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
-    if numeric_columns:
-        report += f"### Числовые данные\n\n"
-        stats_df = df[numeric_columns].describe().transpose()
-        # Форматируем статистику в виде таблицы Markdown
-        stats_table = "| Столбец | Количество | Среднее | Ст. отклонение | Мин | 25% | 50% | 75% | Макс |\n"
-        stats_table += "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-
-        for column, row in stats_df.iterrows():
-            stats_table += f"| {column} | {row['count']:.0f} | {row['mean']:.2f} | {row['std']:.2f} | {row['min']:.2f} | {row['25%']:.2f} | {row['50%']:.2f} | {row['75%']:.2f} | {row['max']:.2f} |\n"
-
-        report += stats_table + "\n\n"
-
-    # Анализ категориальных данных
-    categorical_columns = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    if categorical_columns:
-        report += f"### Категориальные данные\n\n"
-
-        for column in categorical_columns:
-            value_counts = df[column].value_counts().head(5)  # Топ-5 значений
-            report += f"#### {column}\n\n"
-
-            # Создаем таблицу с частотами значений
-            report += "| Значение | Количество | Процент |\n"
-            report += "| --- | --- | --- |\n"
-
-            for value, count in value_counts.items():
-                percentage = (count / len(df)) * 100
-                report += f"| {value} | {count} | {percentage:.2f}% |\n"
-
-            report += "\n"
-
-    # Анализ пропущенных значений
-    report += f"## Анализ пропущенных значений\n\n"
-    missing_values = df.isnull().sum()
-    if missing_values.sum() > 0:
-        report += "| Столбец | Пропущенные значения | Процент пропущенных |\n"
-        report += "| --- | --- | --- |\n"
-
-        for column, missing in missing_values.items():
-            if missing > 0:
-                percentage = (missing / len(df)) * 100
-                report += f"| {column} | {missing} | {percentage:.2f}% |\n"
-
-        report += "\n"
-    else:
-        report += "Пропущенные значения отсутствуют.\n\n"
-
-    # Заключение
-    report += "## Выводы\n\n"
-    report += "На основе анализа данных можно сделать следующие выводы:\n\n"
-    report += "1. Данные содержат информацию о " + str(df.shape[0]) + " записях с " + str(df.shape[1]) + " характеристиками.\n"
-
-    if numeric_columns:
-        # Находим столбец с наибольшим средним значением
-        max_mean_column = df[numeric_columns].mean().idxmax()
-        max_mean_value = df[numeric_columns].mean().max()
-        report += f"2. Столбец '{max_mean_column}' имеет наибольшее среднее значение ({max_mean_value:.2f}).\n"
-
-    if missing_values.sum() > 0:
-        most_missing = missing_values.idxmax()
-        most_missing_count = missing_values.max()
-        report += f"3. Столбец '{most_missing}' имеет наибольшее количество пропущенных значений ({most_missing_count}).\n"
-
-    report += "\n"
-
-    return report
+        print(f"Error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка обработки: {str(e)}")
