@@ -15,10 +15,10 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/твой_юзернейм/cgs_pw_10.git
+   git clone https://github.com/MrQwait/university_cgs
    cd cgs_pw_10
    ```
-   Замените `https://github.com/твой_юзернейм/cgs_pw_10.git` на URL вашего репозитория.
+   Замените `https://github.com/MrQwait/university_cgs` на URL вашего репозитория.
 
 2. Создайте и активируйте виртуальное окружение:
    ```bash
